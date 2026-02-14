@@ -1,0 +1,1 @@
+# clevo-n960kx-control-center-slop
