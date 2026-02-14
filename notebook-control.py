@@ -166,6 +166,20 @@ class FanController:
         except:
             pass
 
+    def set_manual_mode(self):
+        """Переключить вентиляторы в ручной режим (отключить HW Auto)"""
+        if not self.fd:
+            return
+        try:
+            if self.platform == "clevo":
+                # Запись 0 в регистр авто-режима отключает его
+                ioctl_write_int32(self.fd, W_CL_FANAUTO, 0)
+            elif self.platform == "uniwill":
+                # Для Uniwill просто пишем скорость, это переключает режим
+                pass
+        except Exception as e:
+            print(f"Error setting manual mode: {e}")
+
 
 class FanCurve:
     DEFAULT = [(30, 0), (40, 20), (50, 35), (60, 50), (70, 70), (80, 90), (90, 100)]
@@ -1140,26 +1154,39 @@ class NotebookControlApp:
             self.status_var.set("Fan controller не подключен")
             return
 
+        # 1. Отключаем управление по кривой, чтобы не перезаписывало через секунду
+        self.fan_vars['auto_control'].set(False)
+
+        # 2. Отключаем аппаратный авто-режим (переход в ручной)
+        self.fan_controller.set_manual_mode()
+
         fan_id = self.fan_vars['fan_select'].get()
         speed = self.fan_vars['speed'].get()
 
+        # 3. Применяем скорость
         if fan_id == 2:
             self.fan_controller.set_fan_speed(0, speed)
             self.fan_controller.set_fan_speed(1, speed)
-            self.status_var.set(f"Both fans: {speed}%")
+            self.status_var.set(f"Both fans: {speed}% (Manual)")
         else:
             self.fan_controller.set_fan_speed(fan_id, speed)
-            self.status_var.set(f"Fan {fan_id}: {speed}%")
+            self.status_var.set(f"Fan {fan_id}: {speed}% (Manual)")
 
     def set_fan_auto(self):
         if self.fan_controller.platform:
+            self.fan_vars['auto_control'].set(False) # Также отключаем программную кривую
             self.fan_controller.set_auto()
             self.status_var.set("Fans: Auto mode")
 
     def toggle_auto(self):
         if self.fan_vars['auto_control'].get():
+            # Включаем программный режим по кривой
+            # ВАЖНО: Отключаем аппаратный авто-режим, чтобы он не сбивал скорость
+            if self.fan_controller.platform:
+                self.fan_controller.set_manual_mode()
             self.status_var.set("Авто по кривой: ВКЛ")
         else:
+            # Выключаем программный режим, возвращаем управление железу
             if self.fan_controller.platform:
                 self.fan_controller.set_auto()
             self.status_var.set("Авто по кривой: ВЫКЛ (hardware auto)")
@@ -1590,17 +1617,28 @@ class NotebookControlApp:
         if self.kb_auto_off_active:
             self.kb_monitor.reset_idle_timer()
 
-        # If backlight was turned off by auto-timer, temporarily restore values for saving
+        # If backlight was turned off by auto-timer, restore it first
         if self.kb_was_turned_off:
-            # Use saved values for saving (not current zero values)
-            saved_brightness = self.kb_controller.saved_brightness
-            saved_color = self.kb_controller.saved_color
-            
-            # Temporarily set vars to saved values for save_settings()
-            self.kb_vars['brightness'].set(saved_brightness)
-            self.kb_vars['red'].set(saved_color[0])
-            self.kb_vars['green'].set(saved_color[1])
-            self.kb_vars['blue'].set(saved_color[2])
+            self.kb_was_turned_off = False
+
+            # Restore hardware state
+            if self.kb_vars['control_brightness'].get():
+                if self.kb_vars['fade_enabled'].get():
+                    self.fade_in_backlight()
+                else:
+                    self.kb_controller.restore_state()
+                    # Update vars immediately to saved values
+                    self.kb_vars['brightness'].set(self.kb_controller.saved_brightness)
+
+            # Update vars to correct values immediately for saving
+            # (fade_in_backlight updates vars asynchronously, so we force update here to be safe)
+            self.kb_vars['brightness'].set(self.kb_controller.saved_brightness)
+            if self.kb_controller.has_rgb:
+                self.kb_vars['red'].set(self.kb_controller.saved_color[0])
+                self.kb_vars['green'].set(self.kb_controller.saved_color[1])
+                self.kb_vars['blue'].set(self.kb_controller.saved_color[2])
+
+            self.on_kb_brightness_change(self.kb_controller.saved_brightness)
 
         self.save_settings()
         self.status_var.set("Настройки подсветки сохранены")
